@@ -808,9 +808,44 @@ jobs:
             fi
           }
 
+          # susfs4ksu c23be8a (2026-08-19) reroutes do_faccessat() through
+          # getname_flags(), but emits the pre-6.12 three-argument form
+          # (name, flags, empty). Linux 6.12 dropped the trailing "empty"
+          # argument, so on android16-6.12 the SUSFS hunk cannot compile:
+          #   fs/open.c:507: error: too many arguments to function call,
+          #                  expected 2, have 3
+          # Drop the third argument when the tree declares the 2-arg
+          # prototype. filename_lookup() and putname() both tolerate an
+          # ERR_PTR, but ksu_handle_faccessat() dereferences it, so also
+          # skip the hook on a failed getname_flags().
+          fix_susfs_getname_flags_arity() {
+            local OPEN_FILE="./fs/open.c"
+            local FS_H="./include/linux/fs.h"
+
+            [ -f "$OPEN_FILE" ] && [ -f "$FS_H" ] || return 0
+
+            # Only 6.12+ trees carry the two-argument prototype.
+            grep -qE 'getname_flags\(const char __user \*, int\);' "$FS_H" || return 0
+
+            local OLD_CALL='fname = getname_flags(filename, lookup_flags, NULL);'
+            local NEW_CALL='fname = getname_flags(filename, lookup_flags);'
+            local OLD_HOOK='ksu_handle_faccessat(&dfd, &fname, &mode, NULL);'
+            local NEW_HOOK='if (!IS_ERR(fname)) ksu_handle_faccessat(&dfd, &fname, &mode, NULL);'
+
+            if grep -qF "$OLD_CALL" "$OPEN_FILE"; then
+              replace_text_file "$OPEN_FILE" "$OLD_CALL" "$NEW_CALL"
+              echo "✅ Fixed SUSFS getname_flags() arity for ${KANDROID_VERSION}-${KERNEL_VERSION}"
+
+              if grep -qF "$OLD_HOOK" "$OPEN_FILE"; then
+                replace_text_file "$OPEN_FILE" "$OLD_HOOK" "$NEW_HOOK"
+              fi
+            fi
+          }
+
           if [ "${SUSFS_META}" != "-1" ]; then
             apply_patch_safe "50_add_susfs_in_gki-${KANDROID_VERSION}-${KERNEL_VERSION}.patch" "SUSFS Integration" || true
             fix_op15_recovery_bootloop_sus_mount
+            fix_susfs_getname_flags_arity
 
             if [ "${{ inputs.XUS_FIX }}" = "true" ]; then
               apply_patch_safe "../../Action-Build/patches/No_5uS.patch" "No_5uS Fix" || true
